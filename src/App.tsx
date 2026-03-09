@@ -310,15 +310,15 @@ function App() {
   }
 
   if (!bootstrap) {
-    return <div className="loading-shell">正在加载 Codex Governor...</div>;
+    return <div className="loading-shell">正在加载 Codex Executive Officer...</div>;
   }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-kicker">OpenClaw Mode</div>
-          <h1>Codex Governor</h1>
+          <div className="brand-kicker">CCEO</div>
+          <h1>Codex Executive Officer</h1>
           <p>把本机 Codex 项目、人格、会话、知识库和 cron-loop 拉到同一张管理桌上。</p>
         </div>
         <nav className="nav-stack">
@@ -384,7 +384,7 @@ function App() {
         {activeTab === "dashboard" ? (
           <section className="content-grid">
             <div className="panel wide">
-              <SectionHeader eyebrow="Governor Status" title="系统概况" detail="直接读取本机 Codex、Qdrant 和已注册项目，避免造一个脱离真实运行面的假后台。" />
+              <SectionHeader eyebrow="Executive Status" title="系统概况" detail="直接读取本机 Codex、Qdrant 和已注册项目，避免造一个脱离真实运行面的假后台。" />
               <div className="metric-grid">
                 <article className="metric-card">
                   <span>默认模型</span>
@@ -805,7 +805,7 @@ function App() {
         {activeTab === "projects" ? (
           <section className="content-grid">
             <div className="panel">
-              <SectionHeader eyebrow="Project Governor" title="项目清单" detail="项目是角色、知识库、会话和 cron-loop 的归属容器，也是总经理的主要调度边界。" />
+              <SectionHeader eyebrow="Project Control" title="项目清单" detail="项目是角色、知识库、会话和 cron-loop 的归属容器，也是总经理的主要调度边界。" />
               <div className="list-stack">
                 {bootstrap.projects.map((project) => (
                   <button key={project.id} className="list-card selectable" onClick={() => setSelectedProjectId(project.id)}>
@@ -911,7 +911,7 @@ function App() {
         {activeTab === "cron" ? (
           <section className="content-grid">
             <div className="panel wide">
-              <SectionHeader eyebrow="Cron Loop Governor" title="cron-loop 任务" detail="直接读取项目内平铺 .cron-loop 文件，并通过 cron-loop 官方 manage_cron.py 执行动作。" />
+              <SectionHeader eyebrow="Cron Control" title="cron-loop 任务" detail="直接读取项目内平铺 .cron-loop 文件，并通过 cron-loop 官方 manage_cron.py 执行动作。" />
               <div className="toolbar">
                 <label>
                   <span>项目</span>

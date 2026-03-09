@@ -30,9 +30,9 @@ export interface RegistrySnapshot {
 function defaultPersona(): PersonaDefinition {
   const ts = nowIso();
   return {
-    id: "persona-governor-main",
+    id: "persona-cceo-main",
     name: "全权总经理",
-    description: "以项目推进和系统治理为中心的 Codex 总经理角色。",
+    description: "以项目推进和系统治理为中心的 Codex Executive Officer 角色。",
     scope: "global",
     personality: "pragmatic",
     model: "gpt-5.4",
@@ -66,8 +66,8 @@ function defaultProject(): ProjectDefinition {
     name: "当前工作区",
     description: "管理当前 workspace 的总控项目。",
     path: process.cwd(),
-    managerPersonaId: "persona-governor-main",
-    participantPersonaIds: ["persona-governor-main"],
+    managerPersonaId: "persona-cceo-main",
+    participantPersonaIds: ["persona-cceo-main"],
     projectMcpServers: ["openaiDeveloperDocs", "wxfilehelper"],
     projectSkills: ["using-superpowers", "cron-loop"],
     projectTools: ["shell", "web_search", "view_image"],
@@ -126,8 +126,8 @@ function defaultThreads(): ManagerThread[] {
   const ts = nowIso();
   return [
     {
-      id: "thread-governor-main",
-      title: "总经理主线程",
+      id: "thread-cceo-main",
+      title: "CCEO 主线程",
       messages: [],
       updatedAt: ts,
     },

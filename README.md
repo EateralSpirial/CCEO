@@ -1,10 +1,12 @@
-# Codex Governor
+# Codex Executive Officer
 
 OpenClaw-style management console for local Codex environments.
 
+Short name: `CCEO`
+
 ## What it does
 
-- Unified web UI with a "general manager" chat surface
+- Unified web UI with a "chief executive" chat surface
 - Persona registry for Codex roles, prompts, skills, MCP references, and channel identity
 - Session and memory index over `~/.codex/sessions` and archived sessions
 - Qdrant knowledge-base registry against local `http://127.0.0.1:6333`

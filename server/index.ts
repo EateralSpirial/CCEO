@@ -141,7 +141,7 @@ app.post("/api/projects/:id/cron-jobs/:job/action", async (req, res) => {
 
 app.post("/api/manager/chat", async (req, res) => {
   const prompt = String(req.body.prompt ?? "").trim();
-  const threadId = String(req.body.threadId ?? "thread-governor-main");
+  const threadId = String(req.body.threadId ?? "thread-cceo-main");
   if (!prompt) {
     res.status(400).json({ error: "prompt is required" });
     return;
@@ -258,5 +258,5 @@ app.use(async (_req, res, next) => {
 
 await ensureManagerDirs();
 app.listen(port, () => {
-  console.log(`Codex Governor API listening on http://127.0.0.1:${port}`);
+  console.log(`Codex Executive Officer API listening on http://127.0.0.1:${port}`);
 });
