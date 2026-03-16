@@ -27,6 +27,79 @@ export interface RegistrySnapshot {
   sessionLinks: SessionLink[];
 }
 
+function blankChannelConfig(): ChannelDefinition["config"] {
+  return {
+    slackMode: "socket",
+    slackWebhookUrl: "",
+    slackChannel: "",
+    slackBotToken: "",
+    slackAppToken: "",
+    slackSigningSecret: "",
+    slackWebhookPath: "/slack/events",
+    slackRequireMention: true,
+    slackDefaultProjectId: "",
+    telegramBotToken: "",
+    telegramChatId: "",
+    telegramApiBaseUrl: "https://api.telegram.org",
+  };
+}
+
+function blankChannelRuntime(): ChannelDefinition["runtime"] {
+  return {};
+}
+
+function normalizedId(value: string | undefined): string | undefined {
+  const trimmed = String(value ?? "").trim();
+  return trimmed || undefined;
+}
+
+function hasText(value: string | undefined): boolean {
+  return Boolean(String(value ?? "").trim());
+}
+
+function inferSlackMode(config: Partial<ChannelDefinition["config"]> | undefined): ChannelDefinition["config"]["slackMode"] {
+  const explicit = String(config?.slackMode ?? "").trim();
+  if (explicit === "webhook" || explicit === "socket" || explicit === "http") {
+    return explicit;
+  }
+  if (String(config?.slackSigningSecret ?? "").trim()) {
+    return "http";
+  }
+  if (String(config?.slackBotToken ?? "").trim() || String(config?.slackAppToken ?? "").trim()) {
+    return "socket";
+  }
+  if (String(config?.slackWebhookUrl ?? "").trim()) {
+    return "webhook";
+  }
+  return "socket";
+}
+
+function normalizeChannelRecord(input: Partial<ChannelDefinition>): ChannelDefinition {
+  const ts = nowIso();
+  const config = {
+    ...blankChannelConfig(),
+    ...(input.config ?? {}),
+  };
+  config.slackMode = inferSlackMode(input.config ?? config);
+
+  return {
+    id: normalizedId(input.id) ?? recordId("channel"),
+    type: input.type ?? "slack",
+    name: input.name ?? "未命名渠道",
+    enabled: input.enabled ?? false,
+    status: input.status ?? "unconfigured",
+    identity: input.identity ?? "",
+    notes: input.notes ?? "",
+    config,
+    runtime: {
+      ...blankChannelRuntime(),
+      ...(input.runtime ?? {}),
+    },
+    createdAt: input.createdAt ?? ts,
+    updatedAt: input.updatedAt ?? ts,
+  };
+}
+
 function defaultPersona(): PersonaDefinition {
   const ts = nowIso();
   return {
@@ -46,7 +119,7 @@ function defaultPersona(): PersonaDefinition {
       "你是本机 Codex 项目的全权总经理。你负责按项目上下文组织角色、知识库、会话、cron-loop 和渠道桥接。",
     developerInstructions:
       "优先读取项目文档、角色配置和既有会话；以推进真实目标为优先，不要停留在空泛总结。",
-    skills: ["using-superpowers", "cron-loop", "openai-docs"],
+    skills: ["using-superpowers", "cron-loop", "strict-frontend-auditor", "playwright", "openai-docs"],
     mcpServers: ["openaiDeveloperDocs", "wxfilehelper"],
     tools: ["shell", "web_search", "view_image", "spawn_agent"],
     channelIdentity: {
@@ -69,7 +142,7 @@ function defaultProject(): ProjectDefinition {
     managerPersonaId: "persona-cceo-main",
     participantPersonaIds: ["persona-cceo-main"],
     projectMcpServers: ["openaiDeveloperDocs", "wxfilehelper"],
-    projectSkills: ["using-superpowers", "cron-loop"],
+    projectSkills: ["using-superpowers", "cron-loop", "strict-frontend-auditor", "playwright"],
     projectTools: ["shell", "web_search", "view_image"],
     knowledgeBaseIds: ["kb-local-qdrant"],
     writableKnowledgeBaseIds: [],
@@ -97,7 +170,7 @@ function defaultKnowledgeBase(): KnowledgeBaseDefinition {
 function defaultChannels(): ChannelDefinition[] {
   const ts = nowIso();
   return [
-    {
+    normalizeChannelRecord({
       id: "channel-slack-primary",
       type: "slack",
       name: "Slack Bridge",
@@ -107,8 +180,8 @@ function defaultChannels(): ChannelDefinition[] {
       notes: "预留给现有 OpenClaw Slack 接入桥。",
       createdAt: ts,
       updatedAt: ts,
-    },
-    {
+    }),
+    normalizeChannelRecord({
       id: "channel-telegram-primary",
       type: "telegram",
       name: "Telegram Bridge",
@@ -118,7 +191,7 @@ function defaultChannels(): ChannelDefinition[] {
       notes: "预留 Telegram Bot / webhook 桥接。",
       createdAt: ts,
       updatedAt: ts,
-    },
+    }),
   ];
 }
 
@@ -132,6 +205,132 @@ function defaultThreads(): ManagerThread[] {
       updatedAt: ts,
     },
   ];
+}
+
+function personaHasMeaningfulContent(input: Partial<PersonaDefinition>): boolean {
+  return (
+    (hasText(input.name) && input.name?.trim() !== "新角色") ||
+    hasText(input.description) ||
+    hasText(input.systemPrompt) ||
+    hasText(input.developerInstructions) ||
+    Boolean(input.skills?.length) ||
+    Boolean(input.mcpServers?.length) ||
+    Boolean(input.tools?.length)
+  );
+}
+
+function knowledgeBaseHasMeaningfulContent(input: Partial<KnowledgeBaseDefinition>): boolean {
+  return (
+    (hasText(input.name) && input.name?.trim() !== "新知识库") ||
+    hasText(input.description) ||
+    hasText(input.collectionName) ||
+    Boolean(input.readOnly)
+  );
+}
+
+function projectHasMeaningfulContent(input: Partial<ProjectDefinition>): boolean {
+  return (
+    (hasText(input.name) && input.name?.trim() !== "新项目") ||
+    hasText(input.description) ||
+    hasText(input.path) ||
+    hasText(input.managerPersonaId) ||
+    Boolean(input.participantPersonaIds?.length) ||
+    Boolean(input.knowledgeBaseIds?.length) ||
+    Boolean(input.writableKnowledgeBaseIds?.length) ||
+    Boolean(input.channelBindings?.length)
+  );
+}
+
+function channelHasMeaningfulContent(input: Partial<ChannelDefinition>): boolean {
+  const config = (input.config ?? {}) as Partial<ChannelDefinition["config"]>;
+  return (
+    (hasText(input.name) && input.name?.trim() !== "新渠道") ||
+    hasText(input.notes) ||
+    input.enabled === true ||
+    input.status === "configured" ||
+    hasText(config.slackChannel) ||
+    hasText(config.slackBotToken) ||
+    hasText(config.slackAppToken) ||
+    hasText(config.slackWebhookUrl) ||
+    hasText(config.slackSigningSecret) ||
+    hasText(config.telegramBotToken) ||
+    hasText(config.telegramChatId)
+  );
+}
+
+function sanitizePersonas(raw: PersonaDefinition[]): PersonaDefinition[] {
+  const seen = new Set<string>();
+  const next: PersonaDefinition[] = [];
+  for (const entry of raw) {
+    const id = normalizedId(entry.id);
+    if (!id && !personaHasMeaningfulContent(entry)) {
+      continue;
+    }
+    const finalId = id ?? recordId("persona");
+    if (seen.has(finalId)) {
+      continue;
+    }
+    seen.add(finalId);
+    next.push({ ...entry, id: finalId });
+  }
+  return next.length ? next : [defaultPersona()];
+}
+
+function sanitizeKnowledgeBases(raw: KnowledgeBaseDefinition[]): KnowledgeBaseDefinition[] {
+  const seen = new Set<string>();
+  const next: KnowledgeBaseDefinition[] = [];
+  for (const entry of raw) {
+    const id = normalizedId(entry.id);
+    if (!id && !knowledgeBaseHasMeaningfulContent(entry)) {
+      continue;
+    }
+    const finalId = id ?? recordId("kb");
+    if (seen.has(finalId)) {
+      continue;
+    }
+    seen.add(finalId);
+    next.push({ ...entry, id: finalId });
+  }
+  return next.length ? next : [defaultKnowledgeBase()];
+}
+
+function sanitizeProjects(raw: ProjectDefinition[]): ProjectDefinition[] {
+  const seen = new Set<string>();
+  const next: ProjectDefinition[] = [];
+  for (const entry of raw) {
+    const id = normalizedId(entry.id);
+    if (!id && !projectHasMeaningfulContent(entry)) {
+      continue;
+    }
+    const finalId = id ?? recordId("project");
+    if (seen.has(finalId)) {
+      continue;
+    }
+    seen.add(finalId);
+    next.push({ ...entry, id: finalId });
+  }
+  return next.length ? next : [defaultProject()];
+}
+
+function sanitizeChannels(raw: ChannelDefinition[]): ChannelDefinition[] {
+  const seen = new Set<string>();
+  const next: ChannelDefinition[] = [];
+  for (const entry of raw) {
+    const id = normalizedId(entry.id);
+    if (!id && !channelHasMeaningfulContent(entry)) {
+      continue;
+    }
+    const normalized = normalizeChannelRecord({
+      ...entry,
+      id: id ?? recordId("channel"),
+    });
+    if (seen.has(normalized.id)) {
+      continue;
+    }
+    seen.add(normalized.id);
+    next.push(normalized);
+  }
+  return next.length ? next : defaultChannels();
 }
 
 async function ensurePersonaArtifacts(persona: PersonaDefinition): Promise<void> {
@@ -164,22 +363,33 @@ async function ensurePersonaArtifacts(persona: PersonaDefinition): Promise<void>
 
 export async function ensureRegistry(): Promise<RegistrySnapshot> {
   await ensureManagerDirs();
-  const personas = await readJson<PersonaDefinition[]>(PERSONAS_FILE, [defaultPersona()]);
-  const projects = await readJson<ProjectDefinition[]>(PROJECTS_FILE, [defaultProject()]);
-  const knowledgeBases = await readJson<KnowledgeBaseDefinition[]>(KNOWLEDGE_BASES_FILE, [defaultKnowledgeBase()]);
-  const channels = await readJson<ChannelDefinition[]>(CHANNELS_FILE, defaultChannels());
+  const rawPersonas = await readJson<PersonaDefinition[]>(PERSONAS_FILE, [defaultPersona()]);
+  const rawProjects = await readJson<ProjectDefinition[]>(PROJECTS_FILE, [defaultProject()]);
+  const rawKnowledgeBases = await readJson<KnowledgeBaseDefinition[]>(KNOWLEDGE_BASES_FILE, [defaultKnowledgeBase()]);
+  const rawChannels = await readJson<ChannelDefinition[]>(CHANNELS_FILE, defaultChannels());
+  const personas = sanitizePersonas(rawPersonas);
+  const projects = sanitizeProjects(rawProjects);
+  const knowledgeBases = sanitizeKnowledgeBases(rawKnowledgeBases);
+  const channels = sanitizeChannels(rawChannels);
   const managerThreads = await readJson<ManagerThread[]>(THREADS_FILE, defaultThreads());
   const sessionLinks = await readJson<SessionLink[]>(SESSION_LINKS_FILE, []);
+  await Promise.all([
+    JSON.stringify(rawPersonas) !== JSON.stringify(personas) ? writeJson(PERSONAS_FILE, personas) : Promise.resolve(),
+    JSON.stringify(rawProjects) !== JSON.stringify(projects) ? writeJson(PROJECTS_FILE, projects) : Promise.resolve(),
+    JSON.stringify(rawKnowledgeBases) !== JSON.stringify(knowledgeBases) ? writeJson(KNOWLEDGE_BASES_FILE, knowledgeBases) : Promise.resolve(),
+    JSON.stringify(rawChannels) !== JSON.stringify(channels) ? writeJson(CHANNELS_FILE, channels) : Promise.resolve(),
+  ]);
   await Promise.all(personas.map((persona) => ensurePersonaArtifacts(persona)));
   return { personas, projects, knowledgeBases, channels, managerThreads, sessionLinks };
 }
 
 export async function upsertPersona(input: Partial<PersonaDefinition> & Pick<PersonaDefinition, "name">): Promise<PersonaDefinition> {
   const snapshot = await ensureRegistry();
-  const existing = snapshot.personas.find((item) => item.id === input.id);
+  const inputId = normalizedId(input.id);
+  const existing = snapshot.personas.find((item) => item.id === inputId);
   const ts = nowIso();
   const persona: PersonaDefinition = {
-    id: existing?.id ?? input.id ?? recordId("persona"),
+    id: existing?.id ?? inputId ?? recordId("persona"),
     name: input.name,
     description: input.description ?? existing?.description ?? "",
     scope: input.scope ?? existing?.scope ?? "global",
@@ -218,10 +428,11 @@ export async function upsertKnowledgeBase(
   input: Partial<KnowledgeBaseDefinition> & Pick<KnowledgeBaseDefinition, "name" | "url">,
 ): Promise<KnowledgeBaseDefinition> {
   const snapshot = await ensureRegistry();
-  const existing = snapshot.knowledgeBases.find((item) => item.id === input.id);
+  const inputId = normalizedId(input.id);
+  const existing = snapshot.knowledgeBases.find((item) => item.id === inputId);
   const ts = nowIso();
   const entry: KnowledgeBaseDefinition = {
-    id: existing?.id ?? input.id ?? recordId("kb"),
+    id: existing?.id ?? inputId ?? recordId("kb"),
     name: input.name,
     description: input.description ?? existing?.description ?? "",
     scope: input.scope ?? existing?.scope ?? "global",
@@ -240,19 +451,29 @@ export async function upsertKnowledgeBase(
 
 export async function upsertChannel(input: Partial<ChannelDefinition> & Pick<ChannelDefinition, "name" | "type">): Promise<ChannelDefinition> {
   const snapshot = await ensureRegistry();
-  const existing = snapshot.channels.find((item) => item.id === input.id);
+  const inputId = normalizedId(input.id);
+  const existing = snapshot.channels.find((item) => item.id === inputId);
   const ts = nowIso();
-  const channel: ChannelDefinition = {
-    id: existing?.id ?? input.id ?? recordId("channel"),
-    type: input.type,
-    name: input.name,
-    enabled: input.enabled ?? existing?.enabled ?? false,
-    status: input.status ?? existing?.status ?? "unconfigured",
-    identity: input.identity ?? existing?.identity ?? "",
-    notes: input.notes ?? existing?.notes ?? "",
-    createdAt: existing?.createdAt ?? ts,
+  const channel = normalizeChannelRecord({
+    ...existing,
+    ...input,
+    type: input.type ?? existing?.type,
+    name: input.name ?? existing?.name,
+    enabled: input.enabled ?? existing?.enabled,
+    status: input.status ?? existing?.status,
+    identity: input.identity ?? existing?.identity,
+    notes: input.notes ?? existing?.notes,
+    config: {
+      ...(existing?.config ?? blankChannelConfig()),
+      ...(input.config ?? {}),
+    },
+    runtime: {
+      ...(existing?.runtime ?? blankChannelRuntime()),
+      ...(input.runtime ?? {}),
+    },
+    createdAt: existing?.createdAt ?? input.createdAt ?? ts,
     updatedAt: ts,
-  };
+  });
   const next = snapshot.channels.filter((item) => item.id !== channel.id);
   next.unshift(channel);
   await writeJson(CHANNELS_FILE, next);
@@ -260,12 +481,46 @@ export async function upsertChannel(input: Partial<ChannelDefinition> & Pick<Cha
   return channel;
 }
 
+export async function updateChannelRuntime(
+  channelId: string,
+  patch: Partial<ChannelDefinition["runtime"]> & { status?: ChannelDefinition["status"] },
+): Promise<ChannelDefinition | undefined> {
+  const snapshot = await ensureRegistry();
+  const existing = snapshot.channels.find((item) => item.id === channelId);
+  if (!existing) {
+    return undefined;
+  }
+  const { status, ...runtimePatch } = patch;
+
+  const updated = normalizeChannelRecord({
+    ...existing,
+    status: status ?? existing.status,
+    runtime: {
+      ...existing.runtime,
+      ...runtimePatch,
+    },
+    updatedAt: nowIso(),
+  });
+
+  const next = snapshot.channels.map((channel) => (channel.id === channelId ? updated : channel));
+  await writeJson(CHANNELS_FILE, next);
+  await appendAudit({
+    type: "channel.runtime.update",
+    channelId,
+    status: updated.status,
+    lastValidationOk: updated.runtime.lastValidationOk ?? null,
+    lastDeliveryOk: updated.runtime.lastDeliveryOk ?? null,
+  });
+  return updated;
+}
+
 export async function upsertProject(input: Partial<ProjectDefinition> & Pick<ProjectDefinition, "name" | "path">): Promise<ProjectDefinition> {
   const snapshot = await ensureRegistry();
-  const existing = snapshot.projects.find((item) => item.id === input.id);
+  const inputId = normalizedId(input.id);
+  const existing = snapshot.projects.find((item) => item.id === inputId);
   const ts = nowIso();
   const project: ProjectDefinition = {
-    id: existing?.id ?? input.id ?? recordId("project"),
+    id: existing?.id ?? inputId ?? recordId("project"),
     name: input.name,
     description: input.description ?? existing?.description ?? "",
     path: input.path,

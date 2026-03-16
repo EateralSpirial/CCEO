@@ -3,3 +3,5 @@ dist/
 .codex-manager/
 .playwright-cli/
 npm-debug.log*
+output/frontend-audit/
+output/runtime/

@@ -1,0 +1,12 @@
+*
+!.gitignore
+!manage.mjs
+!runner.sh
+!prompt.md
+!ledger.md
+!latest.md
+!state.json
+!issues.registry.json
+!issues.events.jsonl
+!issues.summary.md
+!issues.rules.json

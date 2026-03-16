@@ -21,6 +21,8 @@
   兼容扫描各项目 `.cron-loop/`，统一展示与操作任务。
 - `channel-connector` [term_2]
   Slack / Telegram 渠道配置、路由与回流抽象。
+- `operator-guidance-layer` [term_2]
+  为主要工作面提供人类说明、下一步建议、空态引导与结构化结果呈现。
 - `knowledge-ingestion-jobs` [term_2]
   知识库同步、嵌入、Qdrant collection 治理与定时刷新。
 - `manager-automation` [term_2]
@@ -36,8 +38,9 @@
 - 项目管理 -> `project-governor` + `registry-store` [term_1]
 - cron-loop 管理 -> `cron-loop-governor` + `project-governor` [term_1]
 - Slack / Telegram 接入 -> `channel-connector` [term_2]
+- 前端说明层与易读性增强 -> `operator-guidance-layer` + `manager-shell` [term_2]
 - 自动知识库更新 -> `knowledge-ingestion-jobs` + `cron-loop-governor` [term_2]
-- 总经理主动调度 -> `manager-automation` + `codex-runtime-bridge` [term_2]
+- 总经理主动调度与 CCEO 自身持续迭代 -> `manager-automation` + `codex-runtime-bridge` + `cron-loop-governor` [term_2]
 - 权限与审计增强 -> `security-audit` [term_3]
 
 ## 模块职责定义
@@ -91,6 +94,11 @@
 - 输入：渠道凭证与路由配置。
 - 输出：消息桥接、渠道状态。
 
+### `operator-guidance-layer` [term_2]
+- 职责：让主要页面具备清晰的用途说明、下一步建议、空态、工作流说明和结构化结果呈现，减少用户对技术细节的直接负担。
+- 输入：当前选中的角色、项目、渠道，以及 bootstrap 得到的真实系统状态。
+- 输出：面向操作者的引导卡片、动态建议、复杂页工作流说明、可读报告。
+
 ## 输入/输出契约
 - 角色对象：
   - 输入：名称、作用域、personality、instructions、developerInstructions、useDefaultInstructions、model/profile、skills、mcps、toolset、channelStyle。
@@ -108,6 +116,7 @@
 ## 依赖关系
 - `manager-shell` 依赖 `manager-api`。
 - `manager-api` 依赖 `registry-store`、`codex-runtime-bridge`、`session-memory-index`、`knowledge-hub`、`project-governor`、`cron-loop-governor`。
+- `manager-shell` 额外依赖 `operator-guidance-layer`。
 - `project-governor` 依赖 `persona-toolkit`、`knowledge-hub`、`session-memory-index`。
 - `cron-loop-governor` 依赖 `project-governor`。
 - `manager-automation` 后续依赖 `codex-runtime-bridge` 与 `cron-loop-governor`。

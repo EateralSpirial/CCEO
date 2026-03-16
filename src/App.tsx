@@ -1,14 +1,19 @@
 import { startTransition, useEffect, useMemo, useState } from "react";
 import {
+  connectChannel,
+  disconnectChannel,
   getBootstrap,
   getRun,
   linkSession,
+  readEmbeddedBootstrap,
   runCronAction,
   saveChannel,
   saveKnowledgeBase,
   savePersona,
   saveProject,
   sendManagerPrompt,
+  testChannelDelivery,
+  validateChannelConfig,
 } from "./api";
 import type {
   BootstrapPayload,
@@ -20,115 +25,51 @@ import type {
   ProjectDefinition,
   SessionSummary,
 } from "../shared/models";
-
-type TabKey = "dashboard" | "manager" | "personas" | "sessions" | "knowledge" | "projects" | "cron" | "channels";
-
-function blankPersona(): PersonaDefinition {
-  const now = new Date().toISOString();
-  return {
-    id: "",
-    name: "新角色",
-    description: "",
-    scope: "global",
-    personality: "pragmatic",
-    model: "gpt-5.4",
-    reasoningEffort: "xhigh",
-    verbosity: "high",
-    webSearch: "live",
-    profile: "",
-    useProjectDocs: true,
-    replaceBuiltInInstructions: false,
-    systemPrompt: "",
-    developerInstructions: "",
-    skills: [],
-    mcpServers: [],
-    tools: [],
-    channelIdentity: {
-      displayName: "角色名",
-      replyRules: "直接、可执行。",
-      deliveryStyle: "统一管理口径",
-    },
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function blankProject(): ProjectDefinition {
-  const now = new Date().toISOString();
-  return {
-    id: "",
-    name: "新项目",
-    description: "",
-    path: "",
-    managerPersonaId: "",
-    participantPersonaIds: [],
-    projectMcpServers: [],
-    projectSkills: [],
-    projectTools: [],
-    knowledgeBaseIds: [],
-    writableKnowledgeBaseIds: [],
-    channelBindings: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function blankKnowledgeBase(): KnowledgeBaseDefinition {
-  const now = new Date().toISOString();
-  return {
-    id: "",
-    name: "新知识库",
-    description: "",
-    scope: "global",
-    url: "http://127.0.0.1:6333",
-    collectionName: "",
-    readOnly: false,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function blankChannel(): ChannelDefinition {
-  const now = new Date().toISOString();
-  return {
-    id: "",
-    type: "slack",
-    name: "新渠道",
-    enabled: false,
-    status: "unconfigured",
-    identity: "总经理",
-    notes: "",
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function toggleValue(values: string[], value: string): string[] {
-  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
-}
-
-function SectionHeader(props: { eyebrow: string; title: string; detail: string }) {
-  return (
-    <header className="section-header">
-      <span>{props.eyebrow}</span>
-      <h2>{props.title}</h2>
-      <p>{props.detail}</p>
-    </header>
-  );
-}
-
-function Pill(props: { children: string; tone?: "good" | "warn" | "neutral" }) {
-  return <span className={`pill ${props.tone ?? "neutral"}`}>{props.children}</span>;
-}
+import {
+  blankChannel,
+  blankKnowledgeBase,
+  blankPersona,
+  blankProject,
+  buildContextGuide,
+  buildRecommendedActions,
+  ChannelSetupGuide,
+  ChannelActionDetails,
+  CronActionDetails,
+  type CronActionName,
+  type CronActionResult,
+  type ChannelActionReport,
+  formatDateTime,
+  GuidePanel,
+  hasChannelDraftChanges,
+  hasKnowledgeDraftChanges,
+  hasPersonaDraftChanges,
+  hasProjectDraftChanges,
+  parseTabHash,
+  Pill,
+  SectionHeader,
+  tabNavigation,
+  tabGuides,
+  tabWorkflowGuides,
+  type TabKey,
+  toggleChannelBinding,
+  toggleValue,
+  updateChannelBinding,
+} from "./app-support";
 
 function App() {
-  const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
+  const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(() => readEmbeddedBootstrap());
+  const [bootstrapError, setBootstrapError] = useState("");
+  const [activeTab, setActiveTab] = useState<TabKey>(() =>
+    typeof window === "undefined" ? "dashboard" : parseTabHash(window.location.hash),
+  );
   const [busyLabel, setBusyLabel] = useState("");
   const [selectedPersonaId, setSelectedPersonaId] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [focusedSessionId, setFocusedSessionId] = useState("");
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [sessionShowAll, setSessionShowAll] = useState(false);
   const [personaDraft, setPersonaDraft] = useState<PersonaDefinition>(blankPersona());
   const [projectDraft, setProjectDraft] = useState<ProjectDefinition>(blankProject());
   const [knowledgeDraft, setKnowledgeDraft] = useState<KnowledgeBaseDefinition>(blankKnowledgeBase());
@@ -136,20 +77,49 @@ function App() {
   const [chatPrompt, setChatPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<ManagerRun | null>(null);
   const [runError, setRunError] = useState("");
-  const [cronOutput, setCronOutput] = useState("");
+  const [cronActionResult, setCronActionResult] = useState<CronActionResult | null>(null);
+  const [channelTestMessage, setChannelTestMessage] = useState("CCEO 渠道桥测试消息。");
+  const [channelActionReport, setChannelActionReport] = useState<ChannelActionReport | null>(null);
+  const [channelActionError, setChannelActionError] = useState("");
   const [sessionEdits, setSessionEdits] = useState<Record<string, { projectId?: string; personaId?: string; notes?: string }>>({});
 
   const load = async () => {
-    const payload = await getBootstrap();
-    setBootstrap(payload);
-    setSelectedPersonaId((current) => current || payload.personas[0]?.id || "");
-    setSelectedProjectId((current) => current || payload.projects[0]?.id || "");
-    setSelectedChannelId((current) => current || payload.channels[0]?.id || "");
+    try {
+      const payload = await getBootstrap();
+      setBootstrap(payload);
+      setBootstrapError("");
+    } catch (error) {
+      setBootstrapError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   useEffect(() => {
-    void load();
+    if (!bootstrap) {
+      void load();
+    }
+  }, [bootstrap]);
+
+  useEffect(() => {
+    const applyHash = () => setActiveTab(parseTabHash(window.location.hash));
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
   }, []);
+
+  useEffect(() => {
+    if (!bootstrap) {
+      return;
+    }
+    setSelectedPersonaId((current) => current || bootstrap.personas[0]?.id || "");
+    setSelectedProjectId((current) => current || bootstrap.projects[0]?.id || "");
+    setSelectedChannelId((current) => current || bootstrap.channels[0]?.id || "");
+  }, [bootstrap]);
+
+  useEffect(() => {
+    const currentHash = parseTabHash(window.location.hash);
+    if (currentHash !== activeTab) {
+      window.location.hash = activeTab;
+    }
+  }, [activeTab]);
 
   const selectedPersona = useMemo(
     () => bootstrap?.personas.find((item) => item.id === selectedPersonaId) ?? bootstrap?.personas[0] ?? null,
@@ -159,9 +129,70 @@ function App() {
     () => bootstrap?.projects.find((item) => item.id === selectedProjectId) ?? bootstrap?.projects[0] ?? null,
     [bootstrap, selectedProjectId],
   );
+  const selectedChannel = useMemo(
+    () => bootstrap?.channels.find((item) => item.id === selectedChannelId) ?? bootstrap?.channels[0] ?? null,
+    [bootstrap, selectedChannelId],
+  );
+  const selectedKnowledgeBase = useMemo(
+    () => bootstrap?.knowledgeBases.find((item) => item.id === knowledgeDraft.id) ?? null,
+    [bootstrap?.knowledgeBases, knowledgeDraft.id],
+  );
   const thread = bootstrap?.managerThreads[0];
   const currentCronJobs: CronJobSummary[] =
     (selectedProjectId && bootstrap?.cronJobs[selectedProjectId]) || (selectedProject?.id ? bootstrap?.cronJobs[selectedProject.id] : []) || [];
+  const personaNameById = useMemo(
+    () => new Map((bootstrap?.personas ?? []).map((persona) => [persona.id, persona.name])),
+    [bootstrap?.personas],
+  );
+  const projectNameById = useMemo(
+    () => new Map((bootstrap?.projects ?? []).map((project) => [project.id, project.name])),
+    [bootstrap?.projects],
+  );
+  const sortedSessions = useMemo(
+    () => [...(bootstrap?.sessions ?? [])].sort((left, right) => right.sessionId.localeCompare(left.sessionId)),
+    [bootstrap?.sessions],
+  );
+  const matchingSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLowerCase();
+    if (!query) {
+      return sortedSessions;
+    }
+    return sortedSessions.filter((session) => {
+      const haystack = [
+        session.sessionId,
+        session.cwd,
+        session.notes,
+        personaNameById.get(session.personaId ?? "") ?? "",
+        projectNameById.get(session.projectId ?? "") ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [sortedSessions, sessionSearch, personaNameById, projectNameById]);
+  const visibleSessions = useMemo(
+    () => (sessionShowAll ? matchingSessions : matchingSessions.slice(0, 12)),
+    [matchingSessions, sessionShowAll],
+  );
+  const focusedSession =
+    visibleSessions.find((session) => session.sessionId === focusedSessionId) ??
+    matchingSessions.find((session) => session.sessionId === focusedSessionId) ??
+    visibleSessions[0] ??
+    matchingSessions[0] ??
+    null;
+  const focusedSessionEdit = focusedSession ? sessionEdits[focusedSession.sessionId] ?? {} : null;
+  const hasFocusedSessionChanges = focusedSession
+    ? (focusedSessionEdit?.projectId ?? focusedSession.projectId ?? "") !== (focusedSession.projectId ?? "") ||
+      (focusedSessionEdit?.personaId ?? focusedSession.personaId ?? "") !== (focusedSession.personaId ?? "") ||
+      (focusedSessionEdit?.notes ?? focusedSession.notes ?? "") !== (focusedSession.notes ?? "")
+    : false;
+  const personaDraftDirty = useMemo(() => hasPersonaDraftChanges(personaDraft, selectedPersona), [personaDraft, selectedPersona]);
+  const projectDraftDirty = useMemo(() => hasProjectDraftChanges(projectDraft, selectedProject), [projectDraft, selectedProject]);
+  const knowledgeDraftDirty = useMemo(
+    () => hasKnowledgeDraftChanges(knowledgeDraft, selectedKnowledgeBase),
+    [knowledgeDraft, selectedKnowledgeBase],
+  );
+  const channelDraftDirty = useMemo(() => hasChannelDraftChanges(channelDraft, selectedChannel), [channelDraft, selectedChannel]);
 
   useEffect(() => {
     if (selectedPersona) {
@@ -197,7 +228,85 @@ function App() {
     });
   }, [bootstrap?.channels, selectedChannelId]);
 
+  useEffect(() => {
+    setChannelActionReport(null);
+    setChannelActionError("");
+  }, [selectedChannelId]);
+
+  useEffect(() => {
+    if (!focusedSession) {
+      if (focusedSessionId) {
+        setFocusedSessionId("");
+      }
+      return;
+    }
+    if (focusedSession.sessionId !== focusedSessionId) {
+      setFocusedSessionId(focusedSession.sessionId);
+    }
+  }, [focusedSession, focusedSessionId]);
+
   const totalCronJobs = Object.values(bootstrap?.cronJobs ?? {}).flat().length;
+  const tabGuide = tabGuides[activeTab];
+  const contextGuide = useMemo(
+    () =>
+      buildContextGuide({
+        activeTab,
+        selectedProject,
+        selectedPersona,
+        selectedChannel,
+      }),
+    [activeTab, selectedChannel, selectedPersona, selectedProject],
+  );
+  const recommendedGuide = useMemo(
+    () =>
+      bootstrap
+        ? buildRecommendedActions({
+            bootstrap,
+            totalCronJobs,
+            threadMessageCount: thread?.messages.length ?? 0,
+          })
+        : {
+            eyebrow: "Next Moves",
+            title: "正在读取系统状态",
+            detail: "等 bootstrap 返回后，这里会根据真实状态生成下一步建议。",
+            items: ["等待 Codex、Qdrant、项目和渠道状态加载完成。"],
+          },
+    [bootstrap, thread?.messages.length, totalCronJobs],
+  );
+  const personaDraftReady =
+    Boolean(personaDraft.id.trim()) ||
+    personaDraft.name.trim() !== "新角色" ||
+    Boolean(personaDraft.description.trim()) ||
+    Boolean(personaDraft.systemPrompt.trim()) ||
+    Boolean(personaDraft.developerInstructions.trim());
+  const projectDraftReady =
+    Boolean(projectDraft.id.trim()) ||
+    projectDraft.name.trim() !== "新项目" ||
+    Boolean(projectDraft.path.trim()) ||
+    Boolean(projectDraft.description.trim()) ||
+    Boolean(projectDraft.managerPersonaId.trim());
+  const knowledgeDraftReady =
+    Boolean(knowledgeDraft.id.trim()) ||
+    knowledgeDraft.name.trim() !== "新知识库" ||
+    Boolean(knowledgeDraft.collectionName.trim()) ||
+    Boolean(knowledgeDraft.description.trim());
+  const channelDraftReady =
+    Boolean(channelDraft.id.trim()) ||
+    channelDraft.name.trim() !== "新渠道" ||
+    Boolean(channelDraft.notes.trim()) ||
+    channelDraft.identity.trim() !== "总经理" ||
+    Boolean(channelDraft.config.slackChannel.trim()) ||
+    Boolean(channelDraft.config.slackBotToken.trim()) ||
+    Boolean(channelDraft.config.slackAppToken.trim()) ||
+    Boolean(channelDraft.config.slackWebhookUrl.trim()) ||
+    Boolean(channelDraft.config.slackSigningSecret.trim()) ||
+    Boolean(channelDraft.config.telegramBotToken.trim()) ||
+    Boolean(channelDraft.config.telegramChatId.trim());
+  const hasSavedChannel = Boolean(channelDraft.id.trim());
+  const personaDraftCanSave = personaDraftReady && personaDraftDirty;
+  const projectDraftCanSave = projectDraftReady && projectDraftDirty;
+  const knowledgeDraftCanSave = knowledgeDraftReady && knowledgeDraftDirty;
+  const channelDraftCanSave = channelDraftReady && channelDraftDirty;
 
   async function refreshWithLabel(label: string, action: () => Promise<void>) {
     setBusyLabel(label);
@@ -214,33 +323,150 @@ function App() {
   async function handleSavePersona() {
     await refreshWithLabel("正在保存角色...", async () => {
       const payload = { ...personaDraft };
-      await savePersona(payload, payload.id || undefined);
+      const saved = (await savePersona(payload, payload.id || undefined)) as PersonaDefinition;
+      setSelectedPersonaId(saved.id);
+      setPersonaDraft(saved);
     });
   }
 
   async function handleSaveProject() {
     await refreshWithLabel("正在保存项目...", async () => {
       const payload = { ...projectDraft };
-      await saveProject(payload, payload.id || undefined);
+      const saved = (await saveProject(payload, payload.id || undefined)) as ProjectDefinition;
+      setSelectedProjectId(saved.id);
+      setProjectDraft(saved);
     });
   }
 
   async function handleSaveKnowledgeBase() {
     await refreshWithLabel("正在保存知识库...", async () => {
       const payload = { ...knowledgeDraft };
-      await saveKnowledgeBase(payload, payload.id || undefined);
+      const saved = (await saveKnowledgeBase(payload, payload.id || undefined)) as KnowledgeBaseDefinition;
+      setKnowledgeDraft(saved);
     });
   }
 
   async function handleSaveChannel() {
     await refreshWithLabel("正在保存渠道...", async () => {
       const payload = { ...channelDraft };
-      await saveChannel(payload, payload.id || undefined);
+      const saved = (await saveChannel(payload, payload.id || undefined)) as ChannelDefinition;
+      setSelectedChannelId(saved.id);
+      setChannelDraft(saved);
     });
+  }
+
+  async function handleValidateCurrentChannel() {
+    if (!channelDraft.id) {
+      setChannelActionError("请先保存渠道，再执行校验。");
+      return;
+    }
+
+    setBusyLabel("正在校验渠道...");
+    setChannelActionError("");
+    try {
+      const report = await validateChannelConfig(channelDraft.id);
+      setChannelActionReport(report);
+      await load();
+    } catch (error) {
+      setChannelActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleTestCurrentChannel(mode: "dry-run" | "live") {
+    if (!channelDraft.id) {
+      setChannelActionError("请先保存渠道，再执行测试。");
+      return;
+    }
+    if (!channelTestMessage.trim()) {
+      setChannelActionError("测试消息不能为空。");
+      return;
+    }
+    if (channelDraft.type === "slack") {
+      if (channelDraft.config.slackMode === "socket" && (!channelDraft.config.slackBotToken || !channelDraft.config.slackAppToken)) {
+        setChannelActionError("Slack socket mode 需要同时填写 Bot Token 和 App Token。");
+        return;
+      }
+      if (channelDraft.config.slackMode === "webhook" && !channelDraft.config.slackWebhookUrl) {
+        setChannelActionError("Slack webhook 模式需要填写 Webhook URL。");
+        return;
+      }
+      if (channelDraft.config.slackMode === "http" && (!channelDraft.config.slackBotToken || !channelDraft.config.slackSigningSecret)) {
+        setChannelActionError("Slack http 模式需要填写 Bot Token 和 Signing Secret。");
+        return;
+      }
+    }
+    if (channelDraft.type === "telegram" && (!channelDraft.config.telegramBotToken || !channelDraft.config.telegramChatId)) {
+      setChannelActionError("Telegram 需要同时填写 Bot Token 和 Chat ID。");
+      return;
+    }
+
+    setBusyLabel(mode === "dry-run" ? "正在执行 dry-run..." : "正在发送测试消息...");
+    setChannelActionError("");
+    try {
+      const report = await testChannelDelivery(channelDraft.id, {
+        message: channelTestMessage,
+        mode,
+      });
+      setChannelActionReport(report);
+      await load();
+    } catch (error) {
+      setChannelActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleConnectCurrentChannel() {
+    if (!channelDraft.id || channelDraft.type !== "slack") {
+      setChannelActionError("只有已保存的 Slack 渠道支持连接。");
+      return;
+    }
+    if (channelDraft.config.slackMode !== "socket") {
+      setChannelActionError("只有 Slack socket mode 需要 Connect Slack。");
+      return;
+    }
+    if (!channelDraft.config.slackBotToken || !channelDraft.config.slackAppToken) {
+      setChannelActionError("Connect Slack 前需要先填写 Bot Token 和 App Token。");
+      return;
+    }
+
+    setBusyLabel("正在连接 Slack...");
+    setChannelActionError("");
+    try {
+      const report = await connectChannel(channelDraft.id);
+      setChannelActionReport(report);
+      await load();
+    } catch (error) {
+      setChannelActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleDisconnectCurrentChannel() {
+    if (!channelDraft.id || channelDraft.type !== "slack") {
+      setChannelActionError("只有已保存的 Slack 渠道支持断开。");
+      return;
+    }
+
+    setBusyLabel("正在断开 Slack...");
+    setChannelActionError("");
+    try {
+      const report = await disconnectChannel(channelDraft.id);
+      setChannelActionReport(report);
+      await load();
+    } catch (error) {
+      setChannelActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyLabel("");
+    }
   }
 
   async function handleSendPrompt() {
     if (!chatPrompt.trim()) {
+      setRunError("请输入一条明确的治理指令。");
       return;
     }
     setRunError("");
@@ -296,17 +522,50 @@ function App() {
     });
   }
 
-  async function handleCronAction(job: CronJobSummary, action: "pause" | "resume" | "validate" | "paths" | "uninstall") {
+  async function handleCronAction(job: CronJobSummary, action: CronActionName) {
     setBusyLabel(`正在执行 ${action}...`);
     try {
       const result = await runCronAction(job.projectId, job.job, action);
-      setCronOutput(result.output || `${action} completed`);
+      setCronActionResult({
+        job: job.job,
+        action,
+        ok: result.ok,
+        output: result.output || `${action} completed`,
+      });
       await load();
     } catch (error) {
-      setCronOutput(error instanceof Error ? error.message : String(error));
+      setCronActionResult({
+        job: job.job,
+        action,
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setBusyLabel("");
     }
+  }
+
+  if (!bootstrap && bootstrapError) {
+    return (
+      <div className="loading-shell">
+        <article className="guide-panel warn error-shell-card">
+          <span>Bootstrap Error</span>
+          <h3>系统状态没有成功加载</h3>
+          <p>页面不该一直停在“加载中”。这里直接告诉你当前失败原因，并给出重试入口。</p>
+          <ul className="guide-list">
+            <li>确认当前 review server 仍在目标端口提供 `/api/bootstrap`。</li>
+            <li>如果刚改完后端或 registry，先重新构建并刷新页面。</li>
+            <li>当问题持续出现时，优先看浏览器控制台和 `output/runtime/review-server.*.log`。</li>
+          </ul>
+          <pre className="output-box compact">{bootstrapError}</pre>
+          <div className="editor-actions">
+            <button type="button" onClick={() => void load()}>
+              重新加载系统状态
+            </button>
+          </div>
+        </article>
+      </div>
+    );
   }
 
   if (!bootstrap) {
@@ -321,26 +580,47 @@ function App() {
           <h1>Codex Executive Officer</h1>
           <p>把本机 Codex 项目、人格、会话、知识库和 cron-loop 拉到同一张管理桌上。</p>
         </div>
-        <nav className="nav-stack">
-          {[
-            ["dashboard", "总览"],
-            ["manager", "总经理"],
-            ["personas", "角色"],
-            ["sessions", "会话"],
-            ["knowledge", "知识库"],
-            ["projects", "项目"],
-            ["cron", "Cron"],
-            ["channels", "渠道"],
-          ].map(([key, label]) => (
-            <button
-              key={key}
-              className={activeTab === key ? "nav-link active" : "nav-link"}
-              onClick={() => setActiveTab(key as TabKey)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        {activeTab === "dashboard" ? (
+          <nav className="nav-stack">
+            {tabNavigation.map(({ key, label, description, ariaLabel }) =>
+              activeTab === key ? (
+                <article key={key} className="nav-link active current" aria-current="page">
+                  <span className="nav-link-label">{label}</span>
+                  <small className="nav-link-detail">{description}</small>
+                </article>
+              ) : (
+                <button
+                  key={key}
+                  type="button"
+                  className="nav-link"
+                  aria-label={ariaLabel}
+                  data-testid={`nav-${key}`}
+                  onClick={() => setActiveTab(key as TabKey)}
+                >
+                  <span className="nav-link-label">{label}</span>
+                  <small className="nav-link-detail">{description}</small>
+                </button>
+              ),
+            )}
+          </nav>
+        ) : (
+          <div className="nav-stack nav-stack-compact">
+            <label className="nav-picker">
+              <span>切换工作面</span>
+              <select value={activeTab} onChange={(event) => setActiveTab(event.target.value as TabKey)}>
+                {tabNavigation.map(({ key, label }) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <article className="nav-current-card">
+              <strong>{tabGuide.title}</strong>
+              <small>{tabGuide.detail}</small>
+            </article>
+          </div>
+        )}
         <div className="sidebar-footer">
           <Pill tone={bootstrap.qdrant.reachable ? "good" : "warn"}>
             {bootstrap.qdrant.reachable ? "Qdrant Online" : "Qdrant Offline"}
@@ -350,6 +630,19 @@ function App() {
       </aside>
 
       <main className="main-panel">
+        {bootstrapError ? (
+          <article className="guide-panel warn">
+            <span>Refresh Warning</span>
+            <h3>最近一次状态刷新失败</h3>
+            <p>当前页面仍保留上一次成功加载的数据，但这条错误需要处理，否则后续判断会越来越不可靠。</p>
+            <pre className="output-box compact">{bootstrapError}</pre>
+            <div className="editor-actions">
+              <button type="button" onClick={() => void load()}>
+                重新拉取最新状态
+              </button>
+            </div>
+          </article>
+        ) : null}
         <header className="hero-panel">
           <div>
             <span className="hero-kicker">Unified Manager Interface</span>
@@ -380,6 +673,20 @@ function App() {
         </header>
 
         {busyLabel ? <div className="busy-banner">{busyLabel}</div> : null}
+
+        <section className="hero-guides">
+          <GuidePanel {...tabGuide} />
+          <GuidePanel {...contextGuide} />
+          <GuidePanel {...recommendedGuide} />
+        </section>
+
+        {tabWorkflowGuides[activeTab]?.length ? (
+          <section className="hero-guides detail-guides">
+            {tabWorkflowGuides[activeTab]?.map((guide) => (
+              <GuidePanel key={`${activeTab}:${guide.eyebrow}:${guide.title}`} {...guide} />
+            ))}
+          </section>
+        ) : null}
 
         {activeTab === "dashboard" ? (
           <section className="content-grid">
@@ -475,7 +782,7 @@ function App() {
               </div>
 
               <div className="chat-stream">
-                {(thread?.messages ?? []).slice(-14).map((message) => (
+                {(thread?.messages ?? []).slice(-8).map((message) => (
                   <article key={message.id} className={`chat-bubble ${message.role}`}>
                     <header>
                       <strong>{message.role === "user" ? "你" : message.role === "assistant" ? "总经理" : "系统"}</strong>
@@ -491,10 +798,13 @@ function App() {
                   value={chatPrompt}
                   onChange={(event) => setChatPrompt(event.target.value)}
                   placeholder="例如：为 wx-loop 项目挑一个经理角色，并扫描它的 .cron-loop 任务。"
+                  aria-label="给总经理的治理指令"
                 />
                 <div className="composer-bar">
                   <span className="hint">当前角色：{selectedPersona?.name}；当前项目：{selectedProject?.name}</span>
-                  <button onClick={() => void handleSendPrompt()}>发送给总经理</button>
+                  <button data-testid="manager-send" onClick={() => void handleSendPrompt()}>
+                    发送给总经理
+                  </button>
                 </div>
                 {runError ? <p className="error-text">{runError}</p> : null}
               </div>
@@ -539,13 +849,25 @@ function App() {
               <SectionHeader eyebrow="Persona Registry" title="角色清单" detail="角色主要管理人格、指令、工具意图和渠道身份，不和历史会话绑死。" />
               <div className="list-stack">
                 {bootstrap.personas.map((persona) => (
-                  <button key={persona.id} className="list-card selectable" onClick={() => setSelectedPersonaId(persona.id)}>
-                    <strong>{persona.name}</strong>
-                    <span>{persona.description || "无描述"}</span>
-                    <small>{persona.scope} · {persona.model}</small>
-                  </button>
+                  <label
+                    key={persona.id}
+                    className={selectedPersonaId === persona.id ? "selection-card active" : "selection-card"}
+                    data-testid={`persona-card-${persona.id}`}
+                  >
+                    <input
+                      type="radio"
+                      name="selected-persona"
+                      checked={selectedPersonaId === persona.id}
+                      onChange={() => setSelectedPersonaId(persona.id)}
+                    />
+                    <div>
+                      <strong>{persona.name}</strong>
+                      <span>{persona.description || "无描述"}</span>
+                      <small>{persona.scope} · {persona.model}</small>
+                    </div>
+                  </label>
                 ))}
-                <button className="ghost-button" onClick={() => setPersonaDraft(blankPersona())}>
+                <button className="ghost-button" data-testid="persona-new" onClick={() => setPersonaDraft(blankPersona())}>
                   新建角色
                 </button>
               </div>
@@ -638,14 +960,18 @@ function App() {
                   <span>技能</span>
                   <div className="chip-grid">
                     {bootstrap.discovery.skills.map((skill) => (
-                      <button
+                      <label
                         key={skill.name}
-                        className={personaDraft.skills.includes(skill.name) ? "chip active" : "chip"}
-                        onClick={() => setPersonaDraft({ ...personaDraft, skills: toggleValue(personaDraft.skills, skill.name) })}
-                        type="button"
+                        className={personaDraft.skills.includes(skill.name) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`persona-skill-${skill.name}`}
                       >
-                        {skill.name}
-                      </button>
+                        <input
+                          type="checkbox"
+                          checked={personaDraft.skills.includes(skill.name)}
+                          onChange={() => setPersonaDraft({ ...personaDraft, skills: toggleValue(personaDraft.skills, skill.name) })}
+                        />
+                        <span>{skill.name}</span>
+                      </label>
                     ))}
                   </div>
                 </label>
@@ -653,92 +979,171 @@ function App() {
                   <span>MCP</span>
                   <div className="chip-grid">
                     {bootstrap.discovery.mcpServers.map((mcp) => (
-                      <button
+                      <label
                         key={mcp.id}
-                        className={personaDraft.mcpServers.includes(mcp.id) ? "chip active" : "chip"}
-                        onClick={() => setPersonaDraft({ ...personaDraft, mcpServers: toggleValue(personaDraft.mcpServers, mcp.id) })}
-                        type="button"
+                        className={personaDraft.mcpServers.includes(mcp.id) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`persona-mcp-${mcp.id}`}
                       >
-                        {mcp.id}
-                      </button>
+                        <input
+                          type="checkbox"
+                          checked={personaDraft.mcpServers.includes(mcp.id)}
+                          onChange={() => setPersonaDraft({ ...personaDraft, mcpServers: toggleValue(personaDraft.mcpServers, mcp.id) })}
+                        />
+                        <span>{mcp.id}</span>
+                      </label>
                     ))}
                   </div>
                 </label>
               </div>
               <div className="editor-actions">
-                <button onClick={() => void handleSavePersona()}>保存角色</button>
+                {personaDraftCanSave ? (
+                  <button data-testid="persona-save" onClick={() => void handleSavePersona()}>
+                    保存角色
+                  </button>
+                ) : (
+                  <span className="hint">先修改角色草稿，再保存角色。新建角色至少要补一段职责说明或指令，既有角色则只有在你真的改动后才会出现保存动作。</span>
+                )}
               </div>
             </div>
           </section>
         ) : null}
 
         {activeTab === "sessions" ? (
-          <section className="panel">
-            <SectionHeader eyebrow="Session Memory" title="会话与记忆索引" detail="直接读取 ~/.codex/sessions 和 archived_sessions，并允许把会话挂接到项目与角色。" />
-            <div className="session-table">
-              {bootstrap.sessions.map((session) => (
-                <article key={session.sessionId} className="session-row">
-                  <div>
-                    <strong>{session.sessionId}</strong>
-                    <span>{session.cwd || "unknown cwd"}</span>
-                    <small>{session.archived ? "archived" : "active"} · {new Date(session.lastUpdatedAt).toLocaleString()}</small>
-                  </div>
-                  <div className="session-controls">
-                    <select
-                      value={sessionEdits[session.sessionId]?.projectId ?? session.projectId ?? ""}
-                      onChange={(event) => {
-                        setSessionEdits((current) => ({
-                          ...current,
-                          [session.sessionId]: {
-                            ...current[session.sessionId],
-                            projectId: event.target.value,
-                          },
-                        }));
-                      }}
-                    >
-                      <option value="">未挂接项目</option>
-                      {bootstrap.projects.map((project) => (
-                        <option key={project.id} value={project.id}>
-                          {project.name}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={sessionEdits[session.sessionId]?.personaId ?? session.personaId ?? ""}
-                      onChange={(event) => {
-                        setSessionEdits((current) => ({
-                          ...current,
-                          [session.sessionId]: {
-                            ...current[session.sessionId],
-                            personaId: event.target.value,
-                          },
-                        }));
-                      }}
-                    >
-                      <option value="">未挂接角色</option>
-                      {bootstrap.personas.map((persona) => (
-                        <option key={persona.id} value={persona.id}>
-                          {persona.name}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      placeholder="备注"
-                      value={sessionEdits[session.sessionId]?.notes ?? session.notes ?? ""}
-                      onChange={(event) =>
-                        setSessionEdits((current) => ({
-                          ...current,
-                          [session.sessionId]: {
-                            ...current[session.sessionId],
-                            notes: event.target.value,
-                          },
-                        }))
-                      }
-                    />
-                    <button onClick={() => void handleLinkSession(session)}>保存</button>
-                  </div>
+          <section className="content-grid">
+            <div className="panel">
+              <SectionHeader eyebrow="Session Memory" title="会话与记忆索引" detail="直接读取 ~/.codex/sessions 和 archived_sessions，并把高价值会话重新挂回项目与角色。" />
+              <div className="toolbar">
+                <label>
+                  <span>搜索</span>
+                  <input value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder="按 session、cwd、备注、项目或角色搜索" />
+                </label>
+                <label>
+                  <span>显示范围</span>
+                  <select value={sessionShowAll ? "all" : "recent"} onChange={(event) => setSessionShowAll(event.target.value === "all")}>
+                    <option value="recent">最近 12 条</option>
+                    <option value="all">显示全部 {matchingSessions.length} 条</option>
+                  </select>
+                </label>
+              </div>
+              <div className="list-stack">
+                <article className="list-card">
+                  <strong>当前结果集</strong>
+                  <span>总会话 {sortedSessions.length} 条，匹配 {matchingSessions.length} 条，当前显示 {visibleSessions.length} 条。</span>
+                  <small>归档 {sortedSessions.filter((session) => session.archived).length} 条；活跃 {sortedSessions.filter((session) => !session.archived).length} 条。</small>
                 </article>
-              ))}
+                {visibleSessions.map((session) => (
+                  <label
+                    key={session.sessionId}
+                    className={focusedSessionId === session.sessionId ? "session-choice active" : "session-choice"}
+                    data-testid={`session-card-${session.sessionId}`}
+                  >
+                    <input
+                      type="radio"
+                      name="focused-session"
+                      checked={focusedSessionId === session.sessionId}
+                      onChange={() => setFocusedSessionId(session.sessionId)}
+                    />
+                    <div>
+                      <strong>{session.sessionId}</strong>
+                      <span>{session.cwd || "unknown cwd"}</span>
+                      <small>
+                        {session.archived ? "archived" : "active"} · {new Date(session.lastUpdatedAt).toLocaleString()} · 项目：
+                        {projectNameById.get(session.projectId ?? "") || "未挂接"} · 角色：
+                        {personaNameById.get(session.personaId ?? "") || "未挂接"}
+                      </small>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel editor-panel">
+              <SectionHeader eyebrow="Editor" title="会话归属编辑器" detail="一次只编辑当前选中的会话，减少参数墙和无意义滚动，让 resume 使用链更清晰。" />
+              {focusedSession ? (
+                <>
+                  <div className="list-stack">
+                    <article className="list-card">
+                      <strong>{focusedSession.sessionId}</strong>
+                      <span>{focusedSession.cwd || "unknown cwd"}</span>
+                      <small>{focusedSession.archived ? "archived" : "active"} · {new Date(focusedSession.lastUpdatedAt).toLocaleString()}</small>
+                    </article>
+                  </div>
+                  <div className="form-grid">
+                    <label>
+                      <span>挂接项目</span>
+                      <select
+                        value={sessionEdits[focusedSession.sessionId]?.projectId ?? focusedSession.projectId ?? ""}
+                        onChange={(event) => {
+                          setSessionEdits((current) => ({
+                            ...current,
+                            [focusedSession.sessionId]: {
+                              ...current[focusedSession.sessionId],
+                              projectId: event.target.value,
+                            },
+                          }));
+                        }}
+                      >
+                        <option value="">未挂接项目</option>
+                        {bootstrap.projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>挂接角色</span>
+                      <select
+                        value={sessionEdits[focusedSession.sessionId]?.personaId ?? focusedSession.personaId ?? ""}
+                        onChange={(event) => {
+                          setSessionEdits((current) => ({
+                            ...current,
+                            [focusedSession.sessionId]: {
+                              ...current[focusedSession.sessionId],
+                              personaId: event.target.value,
+                            },
+                          }));
+                        }}
+                      >
+                        <option value="">未挂接角色</option>
+                        {bootstrap.personas.map((persona) => (
+                          <option key={persona.id} value={persona.id}>
+                            {persona.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="wide">
+                      <span>备注</span>
+                      <input
+                        placeholder="例如：已完成 Slack socket mode 字段设计，待真实 token 联调"
+                        value={sessionEdits[focusedSession.sessionId]?.notes ?? focusedSession.notes ?? ""}
+                        onChange={(event) =>
+                          setSessionEdits((current) => ({
+                            ...current,
+                            [focusedSession.sessionId]: {
+                              ...current[focusedSession.sessionId],
+                              notes: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="editor-actions">
+                    {hasFocusedSessionChanges ? (
+                      <button data-testid="session-save" onClick={() => void handleLinkSession(focusedSession)}>
+                        保存归属
+                      </button>
+                    ) : (
+                      <span className="hint">修改项目、角色或备注后才会出现保存动作。</span>
+                    )}
+                    <Pill tone={focusedSession.archived ? "warn" : "good"}>{focusedSession.archived ? "archived" : "active"}</Pill>
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">当前没有匹配的会话记录。</div>
+              )}
             </div>
           </section>
         ) : null}
@@ -749,13 +1154,20 @@ function App() {
               <SectionHeader eyebrow="Knowledge Base" title="知识库列表" detail="term_1 以 Qdrant collection 与项目映射为主，保证知识源可见、可绑定、可审计。" />
               <div className="list-stack">
                 {bootstrap.knowledgeBases.map((kb) => (
-                  <button key={kb.id} className="list-card selectable" onClick={() => setKnowledgeDraft(kb)}>
-                    <strong>{kb.name}</strong>
-                    <span>{kb.url}</span>
-                    <small>{kb.collectionName || "未指定 collection"}</small>
-                  </button>
+                  <label
+                    key={kb.id}
+                    className={knowledgeDraft.id === kb.id ? "selection-card active" : "selection-card"}
+                    data-testid={`knowledge-card-${kb.id}`}
+                  >
+                    <input type="radio" name="selected-knowledge-base" checked={knowledgeDraft.id === kb.id} onChange={() => setKnowledgeDraft(kb)} />
+                    <div>
+                      <strong>{kb.name}</strong>
+                      <span>{kb.url}</span>
+                      <small>{kb.collectionName || "未指定 collection"}</small>
+                    </div>
+                  </label>
                 ))}
-                <button className="ghost-button" onClick={() => setKnowledgeDraft(blankKnowledgeBase())}>
+                <button className="ghost-button" data-testid="knowledge-new" onClick={() => setKnowledgeDraft(blankKnowledgeBase())}>
                   新建知识库
                 </button>
               </div>
@@ -793,7 +1205,13 @@ function App() {
                 </label>
               </div>
               <div className="editor-actions">
-                <button onClick={() => void handleSaveKnowledgeBase()}>保存知识库</button>
+                {knowledgeDraftCanSave ? (
+                  <button data-testid="knowledge-save" onClick={() => void handleSaveKnowledgeBase()}>
+                    保存知识库
+                  </button>
+                ) : (
+                  <span className="hint">先修改名称、collection、URL 或用途说明，再保存知识库。没有实际改动时不会重复暴露保存动作。</span>
+                )}
                 <Pill tone={bootstrap.qdrant.reachable ? "good" : "warn"}>
                   {bootstrap.qdrant.reachable ? "Qdrant Reachable" : bootstrap.qdrant.error || "Qdrant Unreachable"}
                 </Pill>
@@ -808,13 +1226,25 @@ function App() {
               <SectionHeader eyebrow="Project Control" title="项目清单" detail="项目是角色、知识库、会话和 cron-loop 的归属容器，也是总经理的主要调度边界。" />
               <div className="list-stack">
                 {bootstrap.projects.map((project) => (
-                  <button key={project.id} className="list-card selectable" onClick={() => setSelectedProjectId(project.id)}>
-                    <strong>{project.name}</strong>
-                    <span>{project.path}</span>
-                    <small>Manager: {bootstrap.personas.find((item) => item.id === project.managerPersonaId)?.name || "未设置"}</small>
-                  </button>
+                  <label
+                    key={project.id}
+                    className={selectedProjectId === project.id ? "selection-card active" : "selection-card"}
+                    data-testid={`project-card-${project.id}`}
+                  >
+                    <input
+                      type="radio"
+                      name="selected-project"
+                      checked={selectedProjectId === project.id}
+                      onChange={() => setSelectedProjectId(project.id)}
+                    />
+                    <div>
+                      <strong>{project.name}</strong>
+                      <span>{project.path}</span>
+                      <small>Manager: {bootstrap.personas.find((item) => item.id === project.managerPersonaId)?.name || "未设置"}</small>
+                    </div>
+                  </label>
                 ))}
-                <button className="ghost-button" onClick={() => setProjectDraft(blankProject())}>
+                <button className="ghost-button" data-testid="project-new" onClick={() => setProjectDraft(blankProject())}>
                   新建项目
                 </button>
               </div>
@@ -849,19 +1279,23 @@ function App() {
                   <span>参与角色</span>
                   <div className="chip-grid">
                     {bootstrap.personas.map((persona) => (
-                      <button
+                      <label
                         key={persona.id}
-                        type="button"
-                        className={projectDraft.participantPersonaIds.includes(persona.id) ? "chip active" : "chip"}
-                        onClick={() =>
-                          setProjectDraft({
-                            ...projectDraft,
-                            participantPersonaIds: toggleValue(projectDraft.participantPersonaIds, persona.id),
-                          })
-                        }
+                        className={projectDraft.participantPersonaIds.includes(persona.id) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`project-participant-${persona.id}`}
                       >
-                        {persona.name}
-                      </button>
+                        <input
+                          type="checkbox"
+                          checked={projectDraft.participantPersonaIds.includes(persona.id)}
+                          onChange={() =>
+                            setProjectDraft({
+                              ...projectDraft,
+                              participantPersonaIds: toggleValue(projectDraft.participantPersonaIds, persona.id),
+                            })
+                          }
+                        />
+                        <span>{persona.name}</span>
+                      </label>
                     ))}
                   </div>
                 </label>
@@ -869,14 +1303,18 @@ function App() {
                   <span>可读知识库</span>
                   <div className="chip-grid">
                     {bootstrap.knowledgeBases.map((kb) => (
-                      <button
+                      <label
                         key={kb.id}
-                        type="button"
-                        className={projectDraft.knowledgeBaseIds.includes(kb.id) ? "chip active" : "chip"}
-                        onClick={() => setProjectDraft({ ...projectDraft, knowledgeBaseIds: toggleValue(projectDraft.knowledgeBaseIds, kb.id) })}
+                        className={projectDraft.knowledgeBaseIds.includes(kb.id) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`project-readable-kb-${kb.id}`}
                       >
-                        {kb.name}
-                      </button>
+                        <input
+                          type="checkbox"
+                          checked={projectDraft.knowledgeBaseIds.includes(kb.id)}
+                          onChange={() => setProjectDraft({ ...projectDraft, knowledgeBaseIds: toggleValue(projectDraft.knowledgeBaseIds, kb.id) })}
+                        />
+                        <span>{kb.name}</span>
+                      </label>
                     ))}
                   </div>
                 </label>
@@ -884,25 +1322,99 @@ function App() {
                   <span>可写知识库</span>
                   <div className="chip-grid">
                     {bootstrap.knowledgeBases.map((kb) => (
-                      <button
+                      <label
                         key={kb.id}
-                        type="button"
-                        className={projectDraft.writableKnowledgeBaseIds.includes(kb.id) ? "chip active" : "chip"}
-                        onClick={() =>
-                          setProjectDraft({
-                            ...projectDraft,
-                            writableKnowledgeBaseIds: toggleValue(projectDraft.writableKnowledgeBaseIds, kb.id),
-                          })
-                        }
+                        className={projectDraft.writableKnowledgeBaseIds.includes(kb.id) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`project-writable-kb-${kb.id}`}
                       >
-                        {kb.name}
-                      </button>
+                        <input
+                          type="checkbox"
+                          checked={projectDraft.writableKnowledgeBaseIds.includes(kb.id)}
+                          onChange={() =>
+                            setProjectDraft({
+                              ...projectDraft,
+                              writableKnowledgeBaseIds: toggleValue(projectDraft.writableKnowledgeBaseIds, kb.id),
+                            })
+                          }
+                        />
+                        <span>{kb.name}</span>
+                      </label>
                     ))}
                   </div>
                 </label>
+                <div className="wide">
+                  <span>渠道绑定</span>
+                  <div className="chip-grid">
+                    {bootstrap.channels.map((channel) => (
+                      <label
+                        key={channel.id}
+                        className={projectDraft.channelBindings.some((binding) => binding.channelId === channel.id) ? "choice-chip active" : "choice-chip"}
+                        data-testid={`project-channel-${channel.id}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={projectDraft.channelBindings.some((binding) => binding.channelId === channel.id)}
+                          onChange={() =>
+                            setProjectDraft({
+                              ...projectDraft,
+                              channelBindings: toggleChannelBinding(projectDraft.channelBindings, channel.id),
+                            })
+                          }
+                        />
+                        <span>{channel.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                {projectDraft.channelBindings.map((binding) => {
+                  const channel = bootstrap.channels.find((item) => item.id === binding.channelId);
+                  return (
+                    <div key={binding.channelId} className="wide">
+                      <span>{channel?.name || binding.channelId}</span>
+                      <div className="form-grid">
+                        <label>
+                          <span>目标房间 / 频道</span>
+                          <input
+                            value={binding.room}
+                            onChange={(event) =>
+                              setProjectDraft({
+                                ...projectDraft,
+                                channelBindings: updateChannelBinding(projectDraft.channelBindings, binding.channelId, {
+                                  room: event.target.value,
+                                }),
+                              })
+                            }
+                            placeholder={channel?.type === "slack" ? "#ops-room" : "-1001234567890"}
+                          />
+                        </label>
+                        <label>
+                          <span>项目别名</span>
+                          <input
+                            value={binding.alias}
+                            onChange={(event) =>
+                              setProjectDraft({
+                                ...projectDraft,
+                                channelBindings: updateChannelBinding(projectDraft.channelBindings, binding.channelId, {
+                                  alias: event.target.value,
+                                }),
+                              })
+                            }
+                            placeholder="例如：主项目群"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
               <div className="editor-actions">
-                <button onClick={() => void handleSaveProject()}>保存项目</button>
+                {projectDraftCanSave ? (
+                  <button data-testid="project-save" onClick={() => void handleSaveProject()}>
+                    保存项目
+                  </button>
+                ) : (
+                  <span className="hint">先补齐真实路径、经理角色或绑定关系，再保存项目。没有实际改动时不会把保存按钮当成“再点一次也行”的伪动作。</span>
+                )}
               </div>
             </div>
           </section>
@@ -911,7 +1423,7 @@ function App() {
         {activeTab === "cron" ? (
           <section className="content-grid">
             <div className="panel wide">
-              <SectionHeader eyebrow="Cron Control" title="cron-loop 任务" detail="直接读取项目内平铺 .cron-loop 文件，并通过 cron-loop 官方 manage_cron.py 执行动作。" />
+              <SectionHeader eyebrow="Cron Control" title="cron-loop singleton loop" detail="直接读取项目内平铺 .cron-loop 文件，并通过 cron-loop 官方 manage_cron.mjs 执行动作。" />
               <div className="toolbar">
                 <label>
                   <span>项目</span>
@@ -935,21 +1447,31 @@ function App() {
                       </div>
                       <div className="cron-actions">
                         <Pill tone={job.status === "active" ? "good" : "neutral"}>{job.status}</Pill>
-                        <button onClick={() => void handleCronAction(job, "validate")}>validate</button>
-                        <button onClick={() => void handleCronAction(job, "pause")}>pause</button>
-                        <button onClick={() => void handleCronAction(job, "resume")}>resume</button>
-                        <button onClick={() => void handleCronAction(job, "paths")}>paths</button>
+                        <button data-testid={`cron-${job.job}-validate`} onClick={() => void handleCronAction(job, "validate")}>validate</button>
+                        <button data-testid={`cron-${job.job}-stop`} onClick={() => void handleCronAction(job, "stop")}>stop</button>
+                        <button data-testid={`cron-${job.job}-start`} onClick={() => void handleCronAction(job, "start")}>start</button>
+                        <button data-testid={`cron-${job.job}-destroy`} onClick={() => void handleCronAction(job, "destroy")}>destroy</button>
+                        <button data-testid={`cron-${job.job}-paths`} onClick={() => void handleCronAction(job, "paths")}>paths</button>
                       </div>
                     </article>
                   ))
                 ) : (
-                  <div className="empty-state">当前项目未发现 .cron-loop 任务。</div>
+                  <article className="guide-panel warn">
+                    <span>Cron Quickstart</span>
+                    <h3>当前项目还没有可管理的 `.cron-loop` singleton loop</h3>
+                    <p>要让“持续推进”变成真实能力，至少需要一个带 prompt、runner、state、latest 和 ledger 的 singleton loop。</p>
+                    <ul className="guide-list">
+                      <li>先在项目根目录建立 `.cron-loop/` 平铺文件。</li>
+                      <li>优先安装一个能持续改进 CCEO 的 singleton loop，而不是只写报告的占位任务。</li>
+                      <li>安装后回到本页，应能看到 schedule、latest.md 和 start/stop 控制。</li>
+                    </ul>
+                  </article>
                 )}
               </div>
             </div>
             <div className="panel">
-              <SectionHeader eyebrow="Action Output" title="动作回显" detail="用于显示 pause / resume / validate / paths 的原始命令输出，便于核对 cron-loop 兼容性。" />
-              <pre className="output-box">{cronOutput || "尚未执行动作。"}</pre>
+              <SectionHeader eyebrow="Action Output" title="动作解读" detail="先给人类可读结论，再保留原始命令输出，便于确认 cron-loop 兼容性与当前状态。" />
+              <CronActionDetails result={cronActionResult} />
             </div>
           </section>
         ) : null}
@@ -957,27 +1479,53 @@ function App() {
         {activeTab === "channels" ? (
           <section className="content-grid">
             <div className="panel">
-              <SectionHeader eyebrow="Channel Bridge" title="渠道清单" detail="term_1 先把 Slack / Telegram 纳入统一对象模型并允许前端编辑，真实投递与回流放到 term_2。" />
+              <SectionHeader eyebrow="Channel Bridge" title="渠道清单" detail="这里统一管理 Slack / Telegram 渠道；Slack 已支持 socket mode 常驻接入、消息回流和连接状态管理。" />
               <div className="list-stack">
                 {bootstrap.channels.map((channel) => (
-                  <button key={channel.id} className="list-card selectable" onClick={() => setSelectedChannelId(channel.id)}>
-                    <strong>{channel.name}</strong>
-                    <span>{channel.type}</span>
-                    <small>{channel.notes || "无备注"}</small>
-                    <div className="inline-pills">
-                      <Pill tone={channel.enabled ? "good" : "warn"}>{channel.enabled ? "enabled" : "disabled"}</Pill>
-                      <Pill>{channel.status}</Pill>
+                  <label
+                    key={channel.id}
+                    className={selectedChannelId === channel.id ? "selection-card active" : "selection-card"}
+                    data-testid={`channel-card-${channel.id}`}
+                  >
+                    <input
+                      type="radio"
+                      name="selected-channel"
+                      checked={selectedChannelId === channel.id}
+                      onChange={() => setSelectedChannelId(channel.id)}
+                    />
+                    <div>
+                      <strong>{channel.name}</strong>
+                      <span>{channel.type}</span>
+                      <small>
+                        {channel.runtime.lastConnectionSummary ||
+                          channel.runtime.lastDeliverySummary ||
+                          channel.runtime.lastValidationSummary ||
+                          channel.notes ||
+                          "无备注"}
+                      </small>
+                      <div className="inline-pills">
+                        <Pill tone={channel.enabled ? "good" : "warn"}>{channel.enabled ? "enabled" : "disabled"}</Pill>
+                        <Pill>{channel.status}</Pill>
+                        {channel.type === "slack" ? <Pill>{channel.runtime.connectionState || "disconnected"}</Pill> : null}
+                      </div>
                     </div>
-                  </button>
+                  </label>
                 ))}
-                <button className="ghost-button" onClick={() => setChannelDraft(blankChannel())}>
+                <button
+                  className="ghost-button"
+                  data-testid="channel-new"
+                  onClick={() => {
+                    setSelectedChannelId("");
+                    setChannelDraft(blankChannel());
+                  }}
+                >
                   新建渠道
                 </button>
               </div>
             </div>
 
             <div className="panel editor-panel">
-              <SectionHeader eyebrow="Editor" title="渠道编辑器" detail="先管理渠道身份、启停与状态记录，为后续 Slack / Telegram 真桥接保留稳定数据模型。" />
+              <SectionHeader eyebrow="Editor" title="渠道编辑器" detail="Slack 现在支持 socket mode 常驻接入；保存后可校验、connect/disconnect，并把 Slack 消息回流到总经理线程。" />
               <div className="form-grid">
                 <label>
                   <span>名称</span>
@@ -1017,9 +1565,281 @@ function App() {
                   <span>备注</span>
                   <textarea value={channelDraft.notes} onChange={(event) => setChannelDraft({ ...channelDraft, notes: event.target.value })} />
                 </label>
+                {channelDraft.type === "slack" ? (
+                  <>
+                    <label>
+                      <span>Slack Mode</span>
+                      <select
+                        value={channelDraft.config.slackMode}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: {
+                              ...channelDraft.config,
+                              slackMode: event.target.value as ChannelDefinition["config"]["slackMode"],
+                            },
+                          })
+                        }
+                      >
+                        <option value="socket">socket</option>
+                        <option value="webhook">webhook</option>
+                        <option value="http">http</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>默认项目</span>
+                      <select
+                        value={channelDraft.config.slackDefaultProjectId}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, slackDefaultProjectId: event.target.value },
+                          })
+                        }
+                      >
+                        <option value="">首个项目兜底</option>
+                        {bootstrap.projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="wide">
+                      <span>默认 Slack Target</span>
+                      <input
+                        value={channelDraft.config.slackChannel}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, slackChannel: event.target.value },
+                          })
+                        }
+                        placeholder="C0123456789 / D0123456789 / #ops-room"
+                      />
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={channelDraft.config.slackRequireMention}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, slackRequireMention: event.target.checked },
+                          })
+                        }
+                      />
+                      <span>频道消息要求 @bot</span>
+                    </label>
+                    {channelDraft.config.slackMode === "socket" ? (
+                      <>
+                        <label className="wide">
+                          <span>Slack Bot Token</span>
+                          <input
+                            type="password"
+                            value={channelDraft.config.slackBotToken}
+                            onChange={(event) =>
+                              setChannelDraft({
+                                ...channelDraft,
+                                config: { ...channelDraft.config, slackBotToken: event.target.value },
+                              })
+                            }
+                            placeholder="xoxb-..."
+                          />
+                        </label>
+                        <label className="wide">
+                          <span>Slack App Token</span>
+                          <input
+                            type="password"
+                            value={channelDraft.config.slackAppToken}
+                            onChange={(event) =>
+                              setChannelDraft({
+                                ...channelDraft,
+                                config: { ...channelDraft.config, slackAppToken: event.target.value },
+                              })
+                            }
+                            placeholder="xapp-..."
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                    {channelDraft.config.slackMode === "http" ? (
+                      <>
+                        <label className="wide">
+                          <span>Slack Bot Token</span>
+                          <input
+                            type="password"
+                            value={channelDraft.config.slackBotToken}
+                            onChange={(event) =>
+                              setChannelDraft({
+                                ...channelDraft,
+                                config: { ...channelDraft.config, slackBotToken: event.target.value },
+                              })
+                            }
+                            placeholder="xoxb-..."
+                          />
+                        </label>
+                        <label className="wide">
+                          <span>Slack Signing Secret</span>
+                          <input
+                            type="password"
+                            value={channelDraft.config.slackSigningSecret}
+                            onChange={(event) =>
+                              setChannelDraft({
+                                ...channelDraft,
+                                config: { ...channelDraft.config, slackSigningSecret: event.target.value },
+                              })
+                            }
+                            placeholder="signing secret"
+                          />
+                        </label>
+                        <label className="wide">
+                          <span>Slack Webhook Path</span>
+                          <input
+                            value={channelDraft.config.slackWebhookPath}
+                            onChange={(event) =>
+                              setChannelDraft({
+                                ...channelDraft,
+                                config: { ...channelDraft.config, slackWebhookPath: event.target.value },
+                              })
+                            }
+                            placeholder="/slack/events"
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                    {channelDraft.config.slackMode === "webhook" ? (
+                      <label className="wide">
+                        <span>Slack Webhook URL</span>
+                        <input
+                          type="password"
+                          value={channelDraft.config.slackWebhookUrl}
+                          onChange={(event) =>
+                            setChannelDraft({
+                              ...channelDraft,
+                              config: { ...channelDraft.config, slackWebhookUrl: event.target.value },
+                            })
+                          }
+                          placeholder="https://hooks.slack.com/services/..."
+                        />
+                      </label>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <label className="wide">
+                      <span>Telegram Bot Token</span>
+                      <input
+                        type="password"
+                        value={channelDraft.config.telegramBotToken}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, telegramBotToken: event.target.value },
+                          })
+                        }
+                        placeholder="123456:ABC..."
+                      />
+                    </label>
+                    <label>
+                      <span>Telegram Chat ID</span>
+                      <input
+                        value={channelDraft.config.telegramChatId}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, telegramChatId: event.target.value },
+                          })
+                        }
+                        placeholder="-1001234567890"
+                      />
+                    </label>
+                    <label className="wide">
+                      <span>Telegram API Base</span>
+                      <input
+                        value={channelDraft.config.telegramApiBaseUrl}
+                        onChange={(event) =>
+                          setChannelDraft({
+                            ...channelDraft,
+                            config: { ...channelDraft.config, telegramApiBaseUrl: event.target.value },
+                          })
+                        }
+                        placeholder="https://api.telegram.org"
+                      />
+                    </label>
+                  </>
+                )}
+                <label className="wide">
+                  <span>测试消息</span>
+                  <textarea value={channelTestMessage} onChange={(event) => setChannelTestMessage(event.target.value)} />
+                </label>
               </div>
+              <ChannelSetupGuide channel={channelDraft} />
               <div className="editor-actions">
-                <button onClick={() => void handleSaveChannel()}>保存渠道</button>
+                {channelDraftCanSave ? (
+                  <button data-testid="channel-save" onClick={() => void handleSaveChannel()}>
+                    保存渠道
+                  </button>
+                ) : (
+                  <span className="hint">先补齐名称、目标或凭证中的任一真实字段，再保存渠道；既有渠道只有在你真的改动后才会重新出现保存动作。</span>
+                )}
+                {hasSavedChannel ? (
+                  <>
+                    <button data-testid="channel-validate" onClick={() => void handleValidateCurrentChannel()}>
+                      校验配置
+                    </button>
+                    <button data-testid="channel-dry-run" onClick={() => void handleTestCurrentChannel("dry-run")}>
+                      Dry Run
+                    </button>
+                    <button data-testid="channel-live-test" onClick={() => void handleTestCurrentChannel("live")}>
+                      真实发送测试
+                    </button>
+                    {channelDraft.type === "slack" ? (
+                      <button data-testid="channel-connect-slack" onClick={() => void handleConnectCurrentChannel()}>
+                        Connect Slack
+                      </button>
+                    ) : null}
+                    {channelDraft.type === "slack" ? (
+                      <button data-testid="channel-disconnect-slack" onClick={() => void handleDisconnectCurrentChannel()}>
+                        Disconnect Slack
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="hint">渠道先保存成真实记录，下面才会出现校验、Dry Run、真实发送和 Slack 连接动作。</span>
+                )}
+              </div>
+              {channelActionError ? <p className="error-text">{channelActionError}</p> : null}
+              <div className="list-stack">
+                <article className="list-card">
+                  <strong>最近一次运行态</strong>
+                  <span>
+                    {channelDraft.runtime.lastConnectionSummary ||
+                      channelDraft.runtime.lastDeliverySummary ||
+                      channelDraft.runtime.lastValidationSummary ||
+                      "暂无记录"}
+                  </span>
+                  <small>
+                    连接：{channelDraft.runtime.connectionState || "未建立"}；校验：{formatDateTime(channelDraft.runtime.lastValidatedAt)}；投递：
+                    {formatDateTime(channelDraft.runtime.lastDeliveryAt)}
+                  </small>
+                  {channelDraft.type === "slack" ? (
+                    <small>
+                      回流：{formatDateTime(channelDraft.runtime.lastInboundAt, "未收到")}；路由项目：{channelDraft.runtime.lastRoutedProjectId || "未命中"}；线程：
+                      {channelDraft.runtime.lastThreadId || "暂无"}
+                    </small>
+                  ) : null}
+                </article>
+                {channelActionReport ? <ChannelActionDetails report={channelActionReport} /> : null}
+                {channelDraft.type === "slack" ? (
+                  <article className="list-card">
+                    <strong>Slack 路由提示</strong>
+                    <span>频道消息优先按项目里的 `channelBindings.room` 命中；DM 和未命中绑定的消息回落到默认项目或首个项目。</span>
+                    <small>
+                      频道内默认要求 `@bot` 才触发；关闭“频道消息要求 @bot”后，机器人所在频道的普通消息也会被转给总经理。
+                    </small>
+                  </article>
+                ) : null}
               </div>
             </div>
           </section>

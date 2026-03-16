@@ -5,6 +5,9 @@ export type VerbosityLevel = "low" | "medium" | "high";
 export type WebSearchMode = "disabled" | "cached" | "live";
 export type ChannelType = "slack" | "telegram";
 export type ChannelStatus = "unconfigured" | "configured" | "error";
+export type ChannelDeliveryMode = "dry-run" | "live";
+export type ChannelConnectionState = "disconnected" | "connecting" | "connected" | "error";
+export type SlackConnectionMode = "webhook" | "socket" | "http";
 export type KnowledgeBaseScope = "global" | "project";
 export type RunStatus = "idle" | "running" | "completed" | "failed";
 
@@ -55,6 +58,43 @@ export interface ChannelBinding {
   alias: string;
 }
 
+export interface ChannelConfig {
+  slackMode: SlackConnectionMode;
+  slackWebhookUrl: string;
+  slackChannel: string;
+  slackBotToken: string;
+  slackAppToken: string;
+  slackSigningSecret: string;
+  slackWebhookPath: string;
+  slackRequireMention: boolean;
+  slackDefaultProjectId: string;
+  telegramBotToken: string;
+  telegramChatId: string;
+  telegramApiBaseUrl: string;
+}
+
+export interface ChannelRuntimeState {
+  connectionState?: ChannelConnectionState;
+  lastConnectionAt?: string;
+  lastConnectionOk?: boolean;
+  lastConnectionSummary?: string;
+  lastConnectedAt?: string;
+  lastDisconnectedAt?: string;
+  lastValidatedAt?: string;
+  lastValidationOk?: boolean;
+  lastValidationSummary?: string;
+  lastDeliveryAt?: string;
+  lastDeliveryMode?: ChannelDeliveryMode;
+  lastDeliveryOk?: boolean;
+  lastDeliverySummary?: string;
+  lastInboundAt?: string;
+  lastInboundSummary?: string;
+  lastRoutedProjectId?: string;
+  lastRoutedPersonaId?: string;
+  lastThreadId?: string;
+  lastError?: string;
+}
+
 export interface ProjectDefinition {
   id: string;
   name: string;
@@ -80,8 +120,39 @@ export interface ChannelDefinition {
   status: ChannelStatus;
   identity: string;
   notes: string;
+  config: ChannelConfig;
+  runtime: ChannelRuntimeState;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ChannelValidationReport {
+  channelId: string;
+  channelType: ChannelType;
+  checkedAt: string;
+  ok: boolean;
+  liveReady: boolean;
+  issues: string[];
+  warnings: string[];
+  summary: string;
+}
+
+export interface ChannelDeliveryReport extends ChannelValidationReport {
+  mode: ChannelDeliveryMode;
+  delivered: boolean;
+  requestPreview: {
+    method: string;
+    url: string;
+    body: string;
+  };
+  httpStatus?: number;
+  responsePreview?: string;
+}
+
+export interface ChannelConnectionReport extends ChannelValidationReport {
+  action: "connect" | "disconnect";
+  connected: boolean;
+  connectionState: ChannelConnectionState;
 }
 
 export interface SessionLink {

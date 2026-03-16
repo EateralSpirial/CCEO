@@ -3,23 +3,47 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import type {
   BootstrapPayload,
-  ManagerMessage,
 } from "../shared/models.js";
-import { startCodexRun, getRun, subscribeRun } from "./lib/codex.js";
+import { getRun, subscribeRun } from "./lib/codex.js";
+import { deliverChannelTest, deriveChannelDeliveryRuntimePatch, deriveChannelRuntimePatch, validateChannel } from "./lib/channels.js";
 import { scanProjectCronJobs, runCronAction } from "./lib/cron-loop.js";
 import { discoverCodexEnvironment } from "./lib/discovery.js";
-import { nowIso, recordId } from "./lib/json-store.js";
-import { ensureRegistry, upsertChannel, upsertKnowledgeBase, upsertPersona, upsertProject, upsertSessionLink, appendThreadMessage } from "./lib/registry.js";
+import { nowIso } from "./lib/json-store.js";
+import { dispatchManagerPrompt } from "./lib/manager.js";
+import { ensureRegistry, upsertChannel, upsertKnowledgeBase, upsertPersona, upsertProject, upsertSessionLink, updateChannelRuntime } from "./lib/registry.js";
 import { ensureManagerDirs } from "./lib/paths.js";
 import { readQdrantStatus } from "./lib/qdrant.js";
 import { discoverSessions } from "./lib/sessions.js";
+import { connectSlackChannel, disconnectSlackChannel, syncSlackChannels } from "./lib/slack-bridge.js";
 
 const app = express();
 const port = Number(process.env.PORT || 3187);
 const clientDistDir = path.join(process.cwd(), "dist", "client");
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(clientDistDir));
+app.use(express.static(clientDistDir, { index: false }));
+
+function serializeBootstrapForHtml(payload: BootstrapPayload): string {
+  return JSON.stringify(payload)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+async function renderClientIndex() {
+  const clientIndex = path.join(clientDistDir, "index.html");
+  const html = await fs.readFile(clientIndex, "utf8");
+  try {
+    const bootstrap = await loadBootstrap();
+    const preloadTag = `<script id="cceo-bootstrap" type="application/json">${serializeBootstrapForHtml(bootstrap)}</script>`;
+    if (html.includes("<div id=\"root\"></div>")) {
+      return html.replace("<div id=\"root\"></div>", `${preloadTag}\n    <div id="root"></div>`);
+    }
+  } catch (error) {
+    console.error("Failed to inline bootstrap payload:", error);
+  }
+  return html;
+}
 
 async function loadBootstrap(): Promise<BootstrapPayload> {
   const registry = await ensureRegistry();
@@ -96,12 +120,90 @@ app.put("/api/knowledge-bases/:id", async (req, res) => {
 
 app.post("/api/channels", async (req, res) => {
   const channel = await upsertChannel(req.body);
+  await syncSlackChannels();
   res.json(channel);
 });
 
 app.put("/api/channels/:id", async (req, res) => {
   const channel = await upsertChannel({ ...req.body, id: req.params.id });
+  await syncSlackChannels();
   res.json(channel);
+});
+
+app.post("/api/channels/:id/validate", async (req, res) => {
+  const registry = await ensureRegistry();
+  const channel = registry.channels.find((entry) => entry.id === req.params.id);
+  if (!channel) {
+    res.status(404).json({ error: "channel not found" });
+    return;
+  }
+
+  const report = validateChannel(channel);
+  await updateChannelRuntime(channel.id, deriveChannelRuntimePatch(report));
+  res.json(report);
+});
+
+app.post("/api/channels/:id/test", async (req, res) => {
+  const registry = await ensureRegistry();
+  const channel = registry.channels.find((entry) => entry.id === req.params.id);
+  if (!channel) {
+    res.status(404).json({ error: "channel not found" });
+    return;
+  }
+
+  const message = String(req.body.message ?? "").trim();
+  if (!message) {
+    res.status(400).json({ error: "message is required" });
+    return;
+  }
+
+  const mode = req.body.mode === "live" ? "live" : "dry-run";
+  const report = await deliverChannelTest({ channel, message, mode });
+  await updateChannelRuntime(channel.id, deriveChannelDeliveryRuntimePatch(report));
+
+  if (mode === "dry-run") {
+    res.json(report);
+    return;
+  }
+
+  if (!report.liveReady) {
+    res.status(422).json(report);
+    return;
+  }
+
+  res.status(report.delivered ? 200 : 502).json(report);
+});
+
+app.post("/api/channels/:id/connect", async (req, res) => {
+  const registry = await ensureRegistry();
+  const channel = registry.channels.find((entry) => entry.id === req.params.id);
+  if (!channel) {
+    res.status(404).json({ error: "channel not found" });
+    return;
+  }
+  if (channel.type !== "slack") {
+    res.status(422).json({ error: "only slack channels support connect/disconnect" });
+    return;
+  }
+
+  const report = await connectSlackChannel(channel.id);
+  res.status(report.connected ? 200 : 422).json(report);
+});
+
+app.post("/api/channels/:id/disconnect", async (req, res) => {
+  const registry = await ensureRegistry();
+  const channel = registry.channels.find((entry) => entry.id === req.params.id);
+  if (!channel) {
+    res.status(404).json({ error: "channel not found" });
+    return;
+  }
+  if (channel.type !== "slack") {
+    res.status(422).json({ error: "only slack channels support connect/disconnect" });
+    return;
+  }
+
+  const report = await disconnectSlackChannel(channel.id);
+  res.json(report);
 });
 
 app.put("/api/sessions/:sessionId/link", async (req, res) => {
@@ -125,7 +227,7 @@ app.get("/api/projects/:id/cron-jobs", async (req, res) => {
 
 app.post("/api/projects/:id/cron-jobs/:job/action", async (req, res) => {
   const action = String(req.body.action ?? "");
-  if (!["pause", "resume", "validate", "paths", "uninstall"].includes(action)) {
+  if (!["stop", "start", "validate", "paths", "destroy"].includes(action)) {
     res.status(400).json({ error: "unsupported action" });
     return;
   }
@@ -135,7 +237,7 @@ app.post("/api/projects/:id/cron-jobs/:job/action", async (req, res) => {
     res.status(404).json({ error: "project not found" });
     return;
   }
-  const result = await runCronAction(project.path, req.params.job, action as "pause" | "resume" | "validate" | "paths" | "uninstall");
+  const result = await runCronAction(project.path, req.params.job, action as "stop" | "start" | "validate" | "paths" | "destroy");
   res.json(result);
 });
 
@@ -147,63 +249,17 @@ app.post("/api/manager/chat", async (req, res) => {
     return;
   }
 
-  const registry = await ensureRegistry();
-  const persona = registry.personas.find((entry) => entry.id === req.body.personaId) ?? registry.personas[0];
-  const project = registry.projects.find((entry) => entry.id === req.body.projectId) ?? registry.projects[0];
-  const userMessage: ManagerMessage = {
-    id: recordId("msg"),
-    role: "user",
-    content: prompt,
-    createdAt: nowIso(),
-    personaId: persona?.id,
-    projectId: project?.id,
-    sessionId: String(req.body.sessionId || ""),
-  };
-  await appendThreadMessage(threadId, userMessage);
-
-  const run = await startCodexRun({
+  const dispatch = await dispatchManagerPrompt({
     prompt,
-    persona,
-    project,
+    threadId,
+    personaId: typeof req.body.personaId === "string" ? req.body.personaId : undefined,
+    projectId: typeof req.body.projectId === "string" ? req.body.projectId : undefined,
     sessionId: typeof req.body.sessionId === "string" && req.body.sessionId.trim() ? req.body.sessionId : undefined,
   });
 
-  let persisted = false;
-  const persistRunCompletion = async () => {
-    if (persisted) {
-      return;
-    }
-    const activeRun = getRun(run.id);
-    if (!activeRun || activeRun.status === "running") {
-      return;
-    }
-    persisted = true;
-    const message: ManagerMessage = {
-      id: recordId("msg"),
-      role: activeRun.status === "completed" ? "assistant" : "system",
-      content: activeRun.finalMessage || "运行结束，但没有生成最终消息。",
-      createdAt: activeRun.completedAt ?? nowIso(),
-      personaId: persona?.id,
-      projectId: project?.id,
-      sessionId: activeRun.sessionId,
-      runId: activeRun.id,
-    };
-    await appendThreadMessage(threadId, message);
-  };
-
-  const unsubscribe = subscribeRun(run.id, () => {
-    void persistRunCompletion().finally(() => {
-      const activeRun = getRun(run.id);
-      if (activeRun?.status !== "running") {
-        unsubscribe();
-      }
-    });
-  });
-  await persistRunCompletion();
-
   res.json({
-    runId: run.id,
-    sessionId: run.sessionId,
+    runId: dispatch.runId,
+    sessionId: dispatch.sessionId,
   });
 });
 
@@ -246,10 +302,13 @@ app.get("/api/runs/:runId/events", (req, res) => {
   });
 });
 
-app.use(async (_req, res, next) => {
-  const clientIndex = path.join(clientDistDir, "index.html");
+app.use(async (req, res, next) => {
+  if (req.path.startsWith("/api/") || /\.[a-zA-Z0-9]+$/.test(req.path)) {
+    next();
+    return;
+  }
   try {
-    const html = await fs.readFile(clientIndex, "utf8");
+    const html = await renderClientIndex();
     res.type("html").send(html);
   } catch {
     next();
@@ -257,6 +316,9 @@ app.use(async (_req, res, next) => {
 });
 
 await ensureManagerDirs();
+await syncSlackChannels().catch((error) => {
+  console.error("Slack channel sync failed during startup:", error);
+});
 app.listen(port, () => {
   console.log(`Codex Executive Officer API listening on http://127.0.0.1:${port}`);
 });

@@ -1,0 +1,26 @@
+{
+  "severity_model": [
+    "critical",
+    "high",
+    "medium",
+    "low"
+  ],
+  "status_model": [
+    "new",
+    "recurring",
+    "investigating",
+    "fix_in_progress",
+    "awaiting_verification",
+    "monitoring",
+    "verified",
+    "closed",
+    "blocked"
+  ],
+  "status_rules": {
+    "close_after_clean_rounds": 3,
+    "reopen_on_recurrence": true,
+    "verified_after_clean_rounds": 1
+  },
+  "updated_at_utc": "2026-03-15T18:40:43.007000+00:00",
+  "version": 1
+}
